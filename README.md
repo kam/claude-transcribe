@@ -33,10 +33,20 @@ Measured on an M5 Pro with a 53-second two-speaker clip, models cached:
 
 ## Requirements
 
-- Apple Silicon Mac, macOS 14 or later, for the Swift backends
+Swift backends (fluid, whisper):
+
+- Apple Silicon Mac, macOS 14 or later
 - Xcode Command Line Tools (`xcode-select --install`), Swift 5.10 or later
-- About 2 GB of disk for models, downloaded on first use
-- Python backend only: Python 3.10+, `ffmpeg`, a Hugging Face token
+- 8 GB unified memory; 16 GB for multi-hour files. Both tools hold the decoded audio in RAM at 64 KB per second on top of the models.
+- Disk: about 2 GB for models, downloaded on first use, plus several GB of SwiftPM build output under each tool's `.build/`
+- Internet once, for the first-run model download from Hugging Face. Later runs are fully offline.
+
+Python backend:
+
+- Python 3.10 or later. The script uses `str | None` syntax, so older versions fail at import.
+- `ffmpeg` on PATH
+- A Hugging Face account and token, with the pyannote model terms accepted
+- On Intel Macs and Linux, faster-whisper runs on CPU and is slow on long files. A CUDA GPU is the realistic path for anything over an hour.
 
 ## Install
 
