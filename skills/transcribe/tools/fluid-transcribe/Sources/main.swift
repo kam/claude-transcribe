@@ -33,16 +33,35 @@ struct FluidTranscribeTool: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        if let n = numSpeakers, n < 1 {
+            FileHandle.standardError.write(Data("Error: --num-speakers must be at least 1\n".utf8))
+            throw ExitCode.validationFailure
+        }
+
+        // Resolve and check the output path before any inference runs.
+        let outputPath = output.map { ($0 as NSString).expandingTildeInPath } ?? {
+            let dir = (resolvedPath as NSString).deletingLastPathComponent
+            let base = ((resolvedPath as NSString).lastPathComponent as NSString).deletingPathExtension
+            return "\(dir)/\(base).transcript.txt"
+        }()
+        try validateOutputPath(outputPath)
+
         let fileName = (resolvedPath as NSString).lastPathComponent
         print("Transcribing: \(fileName)")
-        print("Model: FluidInference/parakeet-tdt-0.6b-v3-coreml + pyannote community-1 (offline)")
+        print("Model: FluidInference/parakeet-tdt-0.6b-v3-coreml + pyannote community-1")
         print("")
 
-        // Load audio once, shared by both pipelines
+        // Load audio once, shared by both pipelines. This holds the whole file as
+        // Float32 (64 KB per second) instead of using the libraries' streaming
+        // URL overloads; fine for hours of audio, not for days.
         print("Loading audio...")
         let loadStart = CFAbsoluteTimeGetCurrent()
         let resolvedURL = URL(fileURLWithPath: resolvedPath)
         let audioSamples = try AudioConverter().resampleAudioFile(resolvedURL)
+        guard !audioSamples.isEmpty else {
+            FileHandle.standardError.write(Data("Error: no audio samples decoded from \(fileName)\n".utf8))
+            throw ExitCode.failure
+        }
         let audioDuration = Float(audioSamples.count) / 16000.0
         let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
         print(String(format: "Audio loaded: %.1fs duration (%.1fs to load)", audioDuration, loadTime))
@@ -61,7 +80,7 @@ struct FluidTranscribeTool: AsyncParsableCommand {
             // Transcription task
             group.addTask {
                 let tStart = CFAbsoluteTimeGetCurrent()
-                if verboseLocal { print("[Transcription] Downloading/loading Parakeet TDT v3 models...") }
+                print("[Transcription] Loading Parakeet TDT v3 models (first run downloads ~600 MB)...")
 
                 let models = try await AsrModels.downloadAndLoad(version: .v3)
                 let asrManager = AsrManager(config: .default)
@@ -83,7 +102,7 @@ struct FluidTranscribeTool: AsyncParsableCommand {
             // Diarization task
             group.addTask {
                 let dStart = CFAbsoluteTimeGetCurrent()
-                if verboseLocal { print("[Diarization] Downloading/loading pyannote community-1 models...") }
+                print("[Diarization] Loading pyannote community-1 models (first run downloads)...")
 
                 var config = OfflineDiarizerConfig()
                 if let n = numSpeakersLocal {
@@ -164,15 +183,7 @@ struct FluidTranscribeTool: AsyncParsableCommand {
             flat.append((speaker, Float(w.startTime), Float(w.endTime), w.word))
         }
 
-        var merged: [(speaker: String, start: Float, end: Float, text: String)] = []
-        for seg in flat {
-            if let last = merged.last, last.speaker == seg.speaker {
-                merged[merged.count - 1].end = seg.end
-                merged[merged.count - 1].text += " " + seg.text
-            } else {
-                merged.append(seg)
-            }
-        }
+        let merged = mergeConsecutive(flat)
 
         // Format output lines
         var lines: [String] = []
@@ -201,12 +212,6 @@ struct FluidTranscribeTool: AsyncParsableCommand {
         }
 
         // Save to file
-        let outputPath = output.map { ($0 as NSString).expandingTildeInPath } ?? {
-            let dir = (resolvedPath as NSString).deletingLastPathComponent
-            let base = ((resolvedPath as NSString).lastPathComponent as NSString).deletingPathExtension
-            return "\(dir)/\(base).transcript.txt"
-        }()
-
         let content = lines.joined(separator: "\n\n") + "\n"
         try content.write(toFile: outputPath, atomically: true, encoding: .utf8)
 
@@ -231,6 +236,38 @@ struct FluidTranscribeTool: AsyncParsableCommand {
             return String(format: "%d:%02d:%02d", hours, minutes, secs)
         }
         return String(format: "%02d:%02d", minutes, secs)
+    }
+
+    func validateOutputPath(_ path: String) throws {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            FileHandle.standardError.write(Data("Error: output path is a directory: \(path)\n".utf8))
+            throw ExitCode.validationFailure
+        }
+        let parent = (path as NSString).deletingLastPathComponent
+        guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDir), isDir.boolValue,
+              FileManager.default.isWritableFile(atPath: parent) else {
+            FileHandle.standardError.write(Data("Error: output directory missing or not writable: \(parent)\n".utf8))
+            throw ExitCode.validationFailure
+        }
+    }
+
+    /// Merge consecutive same-speaker words, but start a new line after a pause
+    /// so a monologue does not collapse into one entry.
+    func mergeConsecutive(
+        _ segments: [(speaker: String, start: Float, end: Float, text: String)],
+        maxGap: Float = 1.5
+    ) -> [(speaker: String, start: Float, end: Float, text: String)] {
+        var merged: [(speaker: String, start: Float, end: Float, text: String)] = []
+        for seg in segments {
+            if let last = merged.last, last.speaker == seg.speaker, seg.start - last.end <= maxGap {
+                merged[merged.count - 1].end = seg.end
+                merged[merged.count - 1].text += " " + seg.text
+            } else {
+                merged.append(seg)
+            }
+        }
+        return merged
     }
 }
 

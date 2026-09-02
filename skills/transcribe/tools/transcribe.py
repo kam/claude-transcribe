@@ -421,14 +421,15 @@ def transcribe_and_diarize(
 # Output formatting
 # ---------------------------------------------------------------------------
 
-def format_transcript(segments: list[dict]) -> str:
+def format_transcript(segments: list[dict], max_gap: float = 1.5) -> str:
     """Format segments into a readable transcript."""
     lines = []
 
-    # Merge consecutive segments from the same speaker
+    # Merge consecutive same-speaker segments, splitting after a pause so a
+    # monologue does not collapse into one line (matches the Swift tools).
     merged: list[dict] = []
     for seg in segments:
-        if merged and merged[-1]["speaker"] == seg["speaker"]:
+        if merged and merged[-1]["speaker"] == seg["speaker"] and seg["start"] - merged[-1]["end"] <= max_gap:
             merged[-1]["end"] = seg["end"]
             merged[-1]["text"] += " " + seg["text"]
         else:
