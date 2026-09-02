@@ -13,11 +13,14 @@ Usage:
 import argparse
 import concurrent.futures
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+PYANNOTE_MODEL = "pyannote/speaker-diarization-community-1"
 
 # Force line-buffered stdout so progress is visible in real time
 # (os.environ["PYTHONUNBUFFERED"] doesn't affect the current process)
@@ -76,6 +79,21 @@ def check_dependencies():
         print(f"Install with: pip install {' '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
+    if shutil.which("ffmpeg") is None:
+        print("ERROR: ffmpeg not found on PATH. Install with: brew install ffmpeg", file=sys.stderr)
+        sys.exit(1)
+
+    # Fail here, not minutes later inside the diarization thread after a full transcription.
+    if not os.environ.get("HF_TOKEN"):
+        print(
+            "ERROR: HF_TOKEN environment variable is not set.\n"
+            "Set it with: export HF_TOKEN='your_huggingface_token'\n"
+            "You must also accept the model terms at:\n"
+            f"  https://huggingface.co/{PYANNOTE_MODEL}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     backend = "mlx-whisper (Apple Silicon GPU)" if MLX_AVAILABLE else "faster-whisper (CPU)"
     print(f"Transcription backend: {backend}")
 
@@ -112,6 +130,9 @@ def convert_to_wav(audio_path: str) -> str | None:
     except subprocess.CalledProcessError as e:
         os.unlink(tmp_wav.name)
         print(f"[diarize] ffmpeg error: {e.stderr.decode(errors='replace')}", file=sys.stderr)
+        raise
+    except Exception:
+        os.unlink(tmp_wav.name)
         raise
     print("[diarize] WAV conversion complete.")
     return tmp_wav.name
@@ -175,16 +196,11 @@ def _transcribe_faster_whisper(audio_path: str, model_size: str, language: str |
     import torch
     from faster_whisper import WhisperModel
 
-    # Determine compute device
+    # CTranslate2 has no MPS support, so Apple Silicon without mlx-whisper runs on CPU.
     if torch.cuda.is_available():
-        device = "cuda"
-        compute_type = "float16"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "cpu"  # faster-whisper uses CTranslate2 which doesn't support MPS
-        compute_type = "int8"
+        device, compute_type = "cuda", "float16"
     else:
-        device = "cpu"
-        compute_type = "int8"
+        device, compute_type = "cpu", "int8"
 
     print(f"[transcribe] Using device: {device} (compute_type: {compute_type})")
     resolved_model = FASTER_WHISPER_MODEL_MAP.get(model_size, model_size)
@@ -233,31 +249,20 @@ def run_diarization(
     import torch
     from pyannote.audio import Pipeline
 
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise RuntimeError(
-            "HF_TOKEN environment variable is not set.\n"
-            "Set it with: export HF_TOKEN='your_huggingface_token'\n"
-            "You must also accept the model terms at:\n"
-            "  https://huggingface.co/pyannote/speaker-diarization-community-1"
-        )
-
     t0 = time.monotonic()
-
-    # Load pipeline while WAV conversion may still be running
-    print("[diarize] Loading pyannote diarization pipeline...")
-    # pyannote MUST run on CPU — MPS has known timestamp bugs on Apple Silicon
-    pyannote_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-community-1",
-        token=hf_token,
-    )
-    pipeline.to(pyannote_device)
-
-    # Now wait for WAV conversion to be ready
-    wav_path = wav_future.result()  # blocks until convert_to_wav() returns
-    diarization_audio_path = wav_path
+    wav_path: str | None = None
     try:
+        # Load pipeline while WAV conversion may still be running.
+        # pyannote MUST NOT run on MPS — known timestamp bugs on Apple Silicon.
+        print("[diarize] Loading pyannote diarization pipeline...")
+        pyannote_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL, token=os.environ["HF_TOKEN"])
+        pipeline.to(pyannote_device)
+
+        # Now wait for WAV conversion to be ready
+        wav_path = wav_future.result()  # blocks until convert_to_wav() returns
+        diarization_audio_path = wav_path
+
         print("[diarize] Running speaker diarization...")
         diarization_kwargs: dict = {}
         if num_speakers is not None:
@@ -279,6 +284,12 @@ def run_diarization(
         print(f"[diarize] Diarization completed in {elapsed:.1f}s")
         return diarization
     finally:
+        # If the pipeline load failed, the WAV may still be in flight; wait so it can be removed.
+        if wav_path is None:
+            try:
+                wav_path = wav_future.result()
+            except Exception:
+                wav_path = None
         if wav_path is not None:
             try:
                 os.unlink(wav_path)
@@ -294,29 +305,25 @@ def align_segments(whisper_segments: list[dict], diarization) -> list[dict]:
     """Align whisper segments with speaker labels from pyannote."""
     print("Aligning transcription with speaker labels...")
 
+    turns = [(turn.start, turn.end, spk) for turn, _, spk in diarization.itertracks(yield_label=True)]
+
     diarized_segments = []
     for ws in whisper_segments:
         ws_start = ws["start"]
         ws_end = ws["end"]
         ws_mid = (ws_start + ws_end) / 2
 
-        # Find the speaker at the midpoint of this segment
+        # Speaker at the midpoint wins; otherwise the turn with the most overlap.
         speaker = "Unknown"
-        for turn, _, spk in diarization.itertracks(yield_label=True):
-            if turn.start <= ws_mid <= turn.end:
+        best_overlap = 0
+        for t_start, t_end, spk in turns:
+            if t_start <= ws_mid <= t_end:
                 speaker = spk
                 break
-
-        # If midpoint didn't match, find the speaker with most overlap
-        if speaker == "Unknown":
-            best_overlap = 0
-            for turn, _, spk in diarization.itertracks(yield_label=True):
-                overlap_start = max(ws_start, turn.start)
-                overlap_end = min(ws_end, turn.end)
-                overlap = max(0, overlap_end - overlap_start)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    speaker = spk
+            overlap = min(ws_end, t_end) - max(ws_start, t_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                speaker = spk
 
         diarized_segments.append(
             {
@@ -465,10 +472,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # --fast overrides --model
-    model_size = args.model
+    if args.fast and args.model != parser.get_default("model"):
+        parser.error("--fast and --model are mutually exclusive")
+    model_size = "distil-large-v3" if args.fast else args.model
     if args.fast:
-        model_size = "distil-large-v3"
         print(f"Fast mode: using distilled model ({model_size})")
 
     # Validate input file

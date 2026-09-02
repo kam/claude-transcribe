@@ -19,9 +19,21 @@ for arg in "$@"; do
 done
 
 DST="$CLAUDE/skills/transcribe"
+SRC="$HERE/skills/transcribe"
+
+# Refuse to delete anything at $DST that is not this skill.
+remove_dst() {
+  [ -e "$DST" ] || [ -L "$DST" ] || return 0
+  if [ -L "$DST" ] || grep -qx 'name: transcribe' "$DST/SKILL.md" 2>/dev/null; then
+    rm -rf "$DST"
+  else
+    echo "$DST exists and is not the transcribe skill; remove it by hand first." >&2
+    exit 1
+  fi
+}
 
 if [ "$MODE" = "uninstall" ]; then
-  rm -rf "$DST"
+  remove_dst
   echo "Removed $DST. Model caches left in place:"
   echo "  ~/Library/Application Support/FluidAudio/Models"
   echo "  ~/Documents/huggingface/models/argmaxinc"
@@ -46,12 +58,20 @@ if [ "$BUILD" = 1 ]; then
 fi
 
 mkdir -p "$CLAUDE/skills"
-rm -rf "$DST"
+remove_dst
 if [ "$MODE" = "copy" ]; then
-  cp -R "$HERE/skills/transcribe" "$DST"
+  # Copy sources without the SwiftPM caches, then just the release binaries.
+  rsync -a --exclude '.build' "$SRC/" "$DST/"
+  for pkg in fluid-transcribe swift-transcribe; do
+    bin="$SRC/tools/$pkg/.build/release/$pkg"
+    if [ -x "$bin" ]; then
+      mkdir -p "$DST/tools/$pkg/.build/release"
+      cp "$bin" "$DST/tools/$pkg/.build/release/$pkg"
+    fi
+  done
 else
-  ln -s "$HERE/skills/transcribe" "$DST"
+  ln -s "$SRC" "$DST"
 fi
 
 echo "Installed ($MODE) at $DST. Restart Claude Code, then run: /transcribe <audio-file>"
-echo "First transcription downloads models (~1 GB, a few minutes). Later runs start in seconds."
+echo "First transcription downloads models (~2 GB for both backends, a few minutes). Later runs start in seconds."

@@ -13,8 +13,10 @@ struct TranscribeTool: AsyncParsableCommand {
     @Argument(help: "Path to the audio file")
     var audioPath: String
 
+    static let defaultModel = "large-v3-v20240930"
+
     @Option(name: .long, help: "Whisper model to use (default: large-v3-turbo)")
-    var model: String = "large-v3-v20240930"
+    var model: String = Self.defaultModel
 
     @Option(name: .long, help: "Language code (e.g. ja, fr). Auto-detected if omitted")
     var language: String?
@@ -34,15 +36,24 @@ struct TranscribeTool: AsyncParsableCommand {
     func run() async throws {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        let resolvedPath = (audioPath as NSString).expandingTildeInPath
+        // Absolute path: the default output path is derived from this, and
+        // deletingLastPathComponent on a bare filename returns "" (i.e. "/").
+        let resolvedPath = URL(fileURLWithPath: (audioPath as NSString).expandingTildeInPath)
+            .standardizedFileURL.path
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
-            print("Error: File not found: \(resolvedPath)")
+            FileHandle.standardError.write(Data("Error: File not found: \(resolvedPath)\n".utf8))
             throw ExitCode.failure
         }
 
+        if fast && model != Self.defaultModel {
+            FileHandle.standardError.write(Data("Error: --fast and --model are mutually exclusive\n".utf8))
+            throw ExitCode.validationFailure
+        }
+        let selectedModel = fast ? "distil-whisper_distil-large-v3" : "openai_whisper-\(model)"
+
         let fileName = (resolvedPath as NSString).lastPathComponent
         print("Transcribing: \(fileName)")
-        print("Model: \(fast ? "distil-whisper_distil-large-v3" : "openai_whisper-\(model)")")
+        print("Model: \(selectedModel)")
         print("")
 
         // Load audio once, shared by both pipelines
@@ -70,7 +81,6 @@ struct TranscribeTool: AsyncParsableCommand {
                 let tStart = CFAbsoluteTimeGetCurrent()
                 print("[Transcription] Initializing WhisperKit...")
 
-                let selectedModel = fast ? "distil-whisper_distil-large-v3" : "openai_whisper-\(model)"
                 let config = WhisperKitConfig(
                     model: selectedModel,
                     verbose: verbose,
@@ -190,7 +200,7 @@ struct TranscribeTool: AsyncParsableCommand {
         }
 
         // Save to file
-        let outputPath = output ?? {
+        let outputPath = output.map { ($0 as NSString).expandingTildeInPath } ?? {
             let dir = (resolvedPath as NSString).deletingLastPathComponent
             let base = ((resolvedPath as NSString).lastPathComponent as NSString).deletingPathExtension
             return "\(dir)/\(base).transcript.txt"

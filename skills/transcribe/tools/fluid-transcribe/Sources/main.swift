@@ -24,9 +24,12 @@ struct FluidTranscribeTool: AsyncParsableCommand {
     func run() async throws {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        let resolvedPath = (audioPath as NSString).expandingTildeInPath
+        // Absolute path: the default output path is derived from this, and
+        // deletingLastPathComponent on a bare filename returns "" (i.e. "/").
+        let resolvedPath = URL(fileURLWithPath: (audioPath as NSString).expandingTildeInPath)
+            .standardizedFileURL.path
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
-            print("Error: File not found: \(resolvedPath)")
+            FileHandle.standardError.write(Data("Error: File not found: \(resolvedPath)\n".utf8))
             throw ExitCode.failure
         }
 
@@ -181,6 +184,13 @@ struct FluidTranscribeTool: AsyncParsableCommand {
             lines.append("[\(start) - \(end)] \(seg.speaker): \(text)")
         }
 
+        // No token timings: emit the plain transcript rather than an empty file
+        let plainText = asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if lines.isEmpty && !plainText.isEmpty {
+            FileHandle.standardError.write(Data("Warning: no word timings returned; speaker labels unavailable\n".utf8))
+            lines.append("[\(formatTimestamp(0)) - \(formatTimestamp(audioDuration))] Unknown: \(plainText)")
+        }
+
         // Print transcript
         print("")
         print("--- Transcript ---")
@@ -191,7 +201,7 @@ struct FluidTranscribeTool: AsyncParsableCommand {
         }
 
         // Save to file
-        let outputPath = output ?? {
+        let outputPath = output.map { ($0 as NSString).expandingTildeInPath } ?? {
             let dir = (resolvedPath as NSString).deletingLastPathComponent
             let base = ((resolvedPath as NSString).lastPathComponent as NSString).deletingPathExtension
             return "\(dir)/\(base).transcript.txt"

@@ -1,11 +1,7 @@
 ---
 name: transcribe
 description: Transcribe audio files with speaker diarization, locally on Apple Silicon. Default is FluidAudio (NVIDIA Parakeet TDT v3 + pyannote community-1 on CoreML, ~100x realtime, English and 24 European languages). `--whisper` switches to WhisperKit large-v3-turbo + SpeakerKit for Japanese and other languages. Python fallback for other platforms. Supports mp3, wav, m4a, flac. Invoke with /transcribe <audio-file-path>.
-user_invocable: true
-arguments:
-  - name: file
-    description: Path to the audio file to transcribe
-    required: true
+argument-hint: "[--whisper|--python] <audio-file>"
 ---
 
 # Audio Transcription with Speaker Diarization
@@ -26,14 +22,14 @@ Three backends, all producing the same transcript format:
 /transcribe --python path/to/audio.mp3
 ```
 
-Pick the backend from the arguments. If the user names a language outside Parakeet's set (see below) and did not pass `--whisper`, use the whisper backend anyway and say so.
+Arguments: `$ARGUMENTS`. Pick the backend from them; the remaining token is the audio path. If the user names a language outside Parakeet's set (see below) and did not pass `--whisper`, use the whisper backend anyway and say so.
 
 ## Execution
 
 ### fluid backend (default)
 
 ```bash
-"${CLAUDE_SKILL_DIR}/tools/fluid-transcribe/.build/release/fluid-transcribe" "{{file}}"
+"${CLAUDE_SKILL_DIR}/tools/fluid-transcribe/.build/release/fluid-transcribe" "<audio-file>"
 ```
 
 Flags:
@@ -43,7 +39,7 @@ Flags:
 
 Parakeet v3 languages: bg, cs, da, de, el, en, es, et, fi, fr, hr, hu, it, lt, lv, mt, nl, pl, pt, ro, ru, sk, sl, sv, uk. No language flag: the model detects within that set.
 
-First run downloads and compiles the models (~4 min, ~1 GB). Later runs start in seconds.
+First run downloads and compiles the models (~4 min, ~1 GB for this backend). Later runs start in seconds.
 
 Rebuild if the binary is missing:
 
@@ -54,13 +50,13 @@ cd "${CLAUDE_SKILL_DIR}/tools/fluid-transcribe" && swift build -c release --prod
 ### whisper backend
 
 ```bash
-"${CLAUDE_SKILL_DIR}/tools/swift-transcribe/.build/release/swift-transcribe" "{{file}}"
+"${CLAUDE_SKILL_DIR}/tools/swift-transcribe/.build/release/swift-transcribe" "<audio-file>"
 ```
 
 Defaults to `large-v3-v20240930` (large-v3-turbo; Argmax's CoreML repo has nothing newer). Flags:
 - `--language ja` — skip language detection (pass it whenever the language is known)
 - `--model large-v3` — full large-v3; slower, marginal gain
-- `--fast` — distil-large-v3, English only. Do not combine with `--model`.
+- `--fast` — distil-large-v3, English only. Mutually exclusive with `--model` (the tool rejects both).
 - `--num-speakers N`, `--output path`, `--verbose`
 
 Rebuild if the binary is missing:
@@ -72,7 +68,7 @@ cd "${CLAUDE_SKILL_DIR}/tools/swift-transcribe" && swift build -c release --prod
 ### python backend
 
 ```bash
-python3 -u "${CLAUDE_SKILL_DIR}/tools/transcribe.py" "{{file}}"
+python3 -u "${CLAUDE_SKILL_DIR}/tools/transcribe.py" "<audio-file>"
 ```
 
 Defaults to `large-v3-turbo` and `pyannote/speaker-diarization-community-1`. Prerequisites:
@@ -82,7 +78,7 @@ pip install faster-whisper "pyannote.audio>=4" torch torchaudio
 pip install mlx-whisper  # Apple Silicon only, optional
 ```
 
-`HF_TOKEN` must be set and the model terms accepted at https://huggingface.co/pyannote/speaker-diarization-community-1. Not installed on this machine; untested since the 2026-09 update.
+`ffmpeg` on PATH, `HF_TOKEN` set, and the model terms accepted at https://huggingface.co/pyannote/speaker-diarization-community-1. The script checks all three before starting.
 
 ## Output Format
 
@@ -93,6 +89,8 @@ pip install mlx-whisper  # Apple Silicon only, optional
 ```
 
 Consecutive segments from the same speaker are merged. A `.transcript.txt` file is saved alongside the input audio unless `--output` is given.
+
+Words that fall outside every diarization turn are attributed differently per backend: fluid picks the nearest turn, python the turn with most overlap, whisper uses SpeakerKit's subsegment strategy. Expect boundary words to shift speaker between backends.
 
 ## Performance (M5 Pro, 2026-09-02, 53 s two-speaker clip, warm models)
 
