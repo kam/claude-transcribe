@@ -73,9 +73,11 @@ else
   ln -s "$SRC" "$DST"
 fi
 
-if [ ! -x "$SRC/tools/fluid-transcribe/.build/release/fluid-transcribe" ]; then
-  echo "Warning: Swift binaries not built; only the Python backend (/transcribe --python) will work." >&2
-  echo "         Build later with: ./install.sh" >&2
-fi
+for pkg in fluid-transcribe swift-transcribe; do
+  if [ ! -x "$SRC/tools/$pkg/.build/release/$pkg" ]; then
+    echo "Warning: $pkg not built; that backend will not work (the Python backend, /transcribe --python, still does)." >&2
+    echo "         Build later with: ./install.sh" >&2
+  fi
+done
 echo "Installed ($MODE) at $DST. Restart Claude Code, then run: /transcribe <audio-file>"
 echo "First transcription downloads models (~2 GB for both backends, a few minutes). Later runs start in seconds."

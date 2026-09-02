@@ -56,11 +56,13 @@ struct TranscribeTool: AsyncParsableCommand {
         let selectedModel = fast ? "distil-whisper_distil-large-v3" : "openai_whisper-\(model)"
 
         // Resolve and check the output path before any inference runs.
-        let outputPath = output.map { ($0 as NSString).expandingTildeInPath } ?? {
+        let rawOutput = output.map { ($0 as NSString).expandingTildeInPath } ?? {
             let dir = (resolvedPath as NSString).deletingLastPathComponent
             let base = ((resolvedPath as NSString).lastPathComponent as NSString).deletingPathExtension
             return "\(dir)/\(base).transcript.txt"
         }()
+        // Absolutize so a bare "-o notes.txt" resolves against cwd, not "".
+        let outputPath = URL(fileURLWithPath: rawOutput).standardizedFileURL.path
         try validateOutputPath(outputPath)
 
         let fileName = (resolvedPath as NSString).lastPathComponent

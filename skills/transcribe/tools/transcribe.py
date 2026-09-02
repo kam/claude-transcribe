@@ -399,11 +399,11 @@ def transcribe_and_diarize(
             [transcription_future, diarization_future],
             return_when=concurrent.futures.FIRST_EXCEPTION,
         )
-        for fut in done:
-            exc = fut.exception()
+        for fut in (transcription_future, diarization_future):
+            exc = fut.exception() if fut in done else None
             if exc is not None:
-                # The executor still joins the surviving worker on exit, so say what
-                # went wrong now rather than after that worker finishes.
+                # Already-running workers cannot be cancelled, so the executor still
+                # joins the survivor on exit. Print now so the user sees the cause at once.
                 print(f"ERROR: {exc}", file=sys.stderr)
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise exc
@@ -514,6 +514,15 @@ def main():
         print(f"ERROR: Audio file not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
+    supported_formats = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma", ".aac", ".webm", ".mp4"}
+    known_extension = audio_path.suffix.lower() in supported_formats
+    if not known_extension:
+        print(
+            f"WARNING: Unrecognized format '{audio_path.suffix}'. "
+            f"Supported: {', '.join(sorted(supported_formats))}",
+            file=sys.stderr,
+        )
+
     # Resolve and check the output path before spending minutes on inference.
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
@@ -528,15 +537,6 @@ def main():
     if not output_path.parent.is_dir():
         print(f"ERROR: Output directory does not exist: {output_path.parent}", file=sys.stderr)
         sys.exit(1)
-
-    supported_formats = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma", ".aac", ".webm", ".mp4"}
-    known_extension = audio_path.suffix.lower() in supported_formats
-    if not known_extension:
-        print(
-            f"WARNING: Unrecognized format '{audio_path.suffix}'. "
-            f"Supported: {', '.join(sorted(supported_formats))}",
-            file=sys.stderr,
-        )
 
     check_dependencies()
 
@@ -558,12 +558,16 @@ def main():
     # Save first: a broken stdout pipe must not discard the run.
     output_path.write_text(transcript + "\n", encoding="utf-8")
 
-    print("=" * 60)
-    print("DIARISED TRANSCRIPT")
-    print("=" * 60)
-    print(transcript)
-    print("=" * 60)
-    print(f"\nTranscript saved to: {output_path}")
+    try:
+        print("=" * 60)
+        print("DIARISED TRANSCRIPT")
+        print("=" * 60)
+        print(transcript)
+        print("=" * 60)
+        print(f"\nTranscript saved to: {output_path}")
+    except BrokenPipeError:
+        # e.g. `| head`; the file is already on disk, so exit cleanly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 if __name__ == "__main__":
