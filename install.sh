@@ -73,5 +73,9 @@ else
   ln -s "$SRC" "$DST"
 fi
 
+if [ ! -x "$SRC/tools/fluid-transcribe/.build/release/fluid-transcribe" ]; then
+  echo "Warning: Swift binaries not built; only the Python backend (/transcribe --python) will work." >&2
+  echo "         Build later with: ./install.sh" >&2
+fi
 echo "Installed ($MODE) at $DST. Restart Claude Code, then run: /transcribe <audio-file>"
 echo "First transcription downloads models (~2 GB for both backends, a few minutes). Later runs start in seconds."

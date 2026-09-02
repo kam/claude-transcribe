@@ -112,7 +112,7 @@ def format_timestamp(seconds: float) -> str:
 # WAV conversion (runs in background so model loading overlaps with it)
 # ---------------------------------------------------------------------------
 
-def convert_to_wav(audio_path: str) -> str | None:
+def convert_to_wav(audio_path: str) -> str:
     """
     Convert audio to 16 kHz mono WAV for pyannote compatibility.
     Always converts (even .wav inputs) to ensure correct sample rate and channel count.
@@ -246,17 +246,24 @@ def run_diarization(
     Waits for wav_future to resolve before starting (gives the path to use).
     Returns the pyannote Annotation object.
     """
-    import torch
-    from pyannote.audio import Pipeline
-
     t0 = time.monotonic()
     wav_path: str | None = None
     try:
+        import torch
+        from pyannote.audio import Pipeline
+
         # Load pipeline while WAV conversion may still be running.
         # pyannote MUST NOT run on MPS — known timestamp bugs on Apple Silicon.
         print("[diarize] Loading pyannote diarization pipeline...")
         pyannote_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL, token=os.environ["HF_TOKEN"])
+        if pipeline is None:
+            # Older pyannote logs and returns None when the token is invalid or the
+            # model terms have not been accepted.
+            raise RuntimeError(
+                f"Could not load {PYANNOTE_MODEL}. Check HF_TOKEN and accept the model terms at\n"
+                f"  https://huggingface.co/{PYANNOTE_MODEL}"
+            )
         pipeline.to(pyannote_device)
 
         # Now wait for WAV conversion to be ready
@@ -387,8 +394,20 @@ def transcribe_and_diarize(
             max_speakers,
         )
 
-        # Wait for both to complete (re-raise any exceptions)
-        whisper_segments, detected_language = transcription_future.result()
+        # Surface the first failure immediately instead of waiting on the slower sibling.
+        done, _ = concurrent.futures.wait(
+            [transcription_future, diarization_future],
+            return_when=concurrent.futures.FIRST_EXCEPTION,
+        )
+        for fut in done:
+            exc = fut.exception()
+            if exc is not None:
+                # The executor still joins the surviving worker on exit, so say what
+                # went wrong now rather than after that worker finishes.
+                print(f"ERROR: {exc}", file=sys.stderr)
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise exc
+        whisper_segments, _detected_language = transcription_future.result()
         diarization = diarization_future.result()
 
     total_elapsed = time.monotonic() - total_start
@@ -478,14 +497,40 @@ def main():
     if args.fast:
         print(f"Fast mode: using distilled model ({model_size})")
 
+    # Speaker bounds: catch contradictions here, not inside the diarization thread.
+    for name in ("num_speakers", "min_speakers", "max_speakers"):
+        value = getattr(args, name)
+        if value is not None and value < 1:
+            parser.error(f"--{name.replace('_', '-')} must be at least 1")
+    if args.min_speakers and args.max_speakers and args.min_speakers > args.max_speakers:
+        parser.error("--min-speakers cannot exceed --max-speakers")
+    if args.num_speakers and (args.min_speakers or args.max_speakers):
+        parser.error("--num-speakers cannot be combined with --min-speakers/--max-speakers")
+
     # Validate input file
     audio_path = Path(args.audio_file).resolve()
     if not audio_path.exists():
         print(f"ERROR: Audio file not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve and check the output path before spending minutes on inference.
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+    elif known_extension:
+        output_path = audio_path.with_suffix(".transcript.txt")
+    else:
+        # with_suffix would truncate "Recording 2026.09.01" at the last dot.
+        output_path = audio_path.with_name(audio_path.name + ".transcript.txt")
+    if output_path.is_dir():
+        print(f"ERROR: Output path is a directory: {output_path}", file=sys.stderr)
+        sys.exit(1)
+    if not output_path.parent.is_dir():
+        print(f"ERROR: Output directory does not exist: {output_path.parent}", file=sys.stderr)
+        sys.exit(1)
+
     supported_formats = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma", ".aac", ".webm", ".mp4"}
-    if audio_path.suffix.lower() not in supported_formats:
+    known_extension = audio_path.suffix.lower() in supported_formats
+    if not known_extension:
         print(
             f"WARNING: Unrecognized format '{audio_path.suffix}'. "
             f"Supported: {', '.join(sorted(supported_formats))}",
@@ -507,18 +552,16 @@ def main():
         max_speakers=args.max_speakers,
     )
 
-    # Format output
     transcript = format_transcript(segments)
+
+    # Save first: a broken stdout pipe must not discard the run.
+    output_path.write_text(transcript + "\n", encoding="utf-8")
 
     print("=" * 60)
     print("DIARISED TRANSCRIPT")
     print("=" * 60)
     print(transcript)
     print("=" * 60)
-
-    # Save to file
-    output_path = Path(args.output) if args.output else audio_path.with_suffix(".transcript.txt")
-    output_path.write_text(transcript, encoding="utf-8")
     print(f"\nTranscript saved to: {output_path}")
 
 
