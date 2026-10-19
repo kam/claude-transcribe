@@ -14,6 +14,8 @@ A Claude Code skill that transcribes audio files with speaker labels, entirely o
 
 The default backend runs at roughly 100x realtime on an M-series Mac: an hour of audio in under a minute, including diarization.
 
+A worked example on NASA's Apollo 11 and Apollo 13 audio, with where each backend fails: [Local audio transcription with speaker labels in Claude Code](https://khamsouk.souvanlasy.com/guides/local-audio-transcription-claude-code/).
+
 ## Backends
 
 | Backend | Engine | Use when |
