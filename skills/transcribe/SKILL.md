@@ -99,7 +99,7 @@ Words that fall outside every diarization turn are attributed differently per ba
 | fluid | 2 (correct) | 0.5 s | ~105x realtime |
 | whisper (1.1.0) | 3 | 8.4 s | ~6x realtime |
 
-Parakeet v3 averages 5.66 WER on the Open ASR Leaderboard against large-v3-turbo's 7.03, but it misses the odd homophone ("rolls" for "roles") and splits some product names. When proper nouns matter more than speed, run `--whisper` as a second pass.
+Parakeet v3's model card reports a 6.34 average WER on the Open ASR Leaderboard against large-v3-turbo's 7.83, but it misses the odd homophone ("rolls" for "roles") and splits some product names. When proper nouns matter more than speed, run `--whisper` as a second pass.
 
 ## Alternatives assessed and rejected (2026-09-02)
 

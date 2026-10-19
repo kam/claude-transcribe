@@ -14,6 +14,8 @@ A Claude Code skill that transcribes audio files with speaker labels, entirely o
 
 The default backend runs at roughly 100x realtime on an M-series Mac: an hour of audio in under a minute, including diarization.
 
+A worked example on NASA's Apollo 11 and Apollo 13 audio, with where each backend fails: [Local audio transcription with speaker labels in Claude Code](https://khamsouk.souvanlasy.com/guides/local-audio-transcription-claude-code/).
+
 ## Backends
 
 | Backend | Engine | Use when |
@@ -22,7 +24,7 @@ The default backend runs at roughly 100x realtime on an M-series Mac: an hour of
 | **whisper** | [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift) large-v3-turbo + SpeakerKit, Core ML | Japanese, Chinese, or any language Parakeet lacks |
 | **python** | mlx-whisper / faster-whisper + pyannote.audio | Linux or Intel Macs |
 
-Parakeet v3 averages 5.66 WER on the Open ASR Leaderboard against large-v3-turbo's 7.03, at a fraction of the compute. Whisper still handles proper nouns better and covers about 100 languages, so it stays as the second pass.
+Parakeet v3's model card reports a 6.34 average WER on the Open ASR Leaderboard against large-v3-turbo's 7.83, at a fraction of the compute. Whisper still handles proper nouns better and covers 99 languages, so it stays as the second pass.
 
 Measured on an M5 Pro with a 53-second two-speaker clip, models cached:
 
